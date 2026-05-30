@@ -1,0 +1,7 @@
+.DS_Store
+dist/
+*.zip
+chatgpt-export-*/
+exports/
+*.log
+node_modules/

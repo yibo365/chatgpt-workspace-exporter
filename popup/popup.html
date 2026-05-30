@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ChatGPT Exporter</title>
+    <link rel="stylesheet" href="./popup.css">
+  </head>
+  <body>
+    <main class="popup">
+      <header class="header">
+        <div>
+          <h1>ChatGPT 导出</h1>
+          <p>在已登录的 ChatGPT 页面运行。</p>
+        </div>
+      </header>
+
+      <section class="status" id="status">正在检查当前标签页...</section>
+
+      <button id="show-panel" type="button">显示导出面板</button>
+      <button id="open-chatgpt" type="button" class="secondary">打开 ChatGPT</button>
+
+      <p class="note">导出会优先写入你选择的本地文件夹；如果浏览器不支持，会退回到下载文件。</p>
+    </main>
+    <script src="./popup.js"></script>
+  </body>
+</html>
