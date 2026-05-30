@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "ChatGPT Workspace Exporter",
   "description": "Export your ChatGPT conversations and projects from the signed-in web app.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "action": {
     "default_title": "ChatGPT Exporter",
     "default_popup": "popup/popup.html"

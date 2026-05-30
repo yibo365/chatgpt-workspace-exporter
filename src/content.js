@@ -9,6 +9,7 @@
     pageSize: 100,
     delayMs: 250,
     maxConversations: 0,
+    scope: "all",
     includeRawJson: true,
     includeMarkdown: true
   };
@@ -164,7 +165,8 @@
         font-weight: 650;
       }
 
-      .cgpt-exporter-field input {
+      .cgpt-exporter-field input,
+      .cgpt-exporter-field select {
         height: 34px;
         box-sizing: border-box;
         border: 1px solid #d9d5ca;
@@ -317,6 +319,8 @@
   }
 
   function buildPanel() {
+    const currentProject = getCurrentProjectInfo();
+    const defaultScope = currentProject ? "currentProject" : DEFAULTS.scope;
     const panel = document.createElement("section");
     panel.id = "cgpt-exporter-panel";
     panel.setAttribute("aria-label", "ChatGPT 导出面板");
@@ -330,6 +334,15 @@
       </header>
       <div class="cgpt-exporter-body">
         <div class="cgpt-exporter-grid">
+          <div class="cgpt-exporter-field">
+            <label for="cgpt-exporter-scope">导出范围</label>
+            <select id="cgpt-exporter-scope" data-option="scope">
+              <option value="currentProject" ${defaultScope === "currentProject" ? "selected" : ""} ${currentProject ? "" : "disabled"}>当前项目</option>
+              <option value="projects" ${defaultScope === "projects" ? "selected" : ""}>所有项目</option>
+              <option value="noProject" ${defaultScope === "noProject" ? "selected" : ""}>项目外</option>
+              <option value="all" ${defaultScope === "all" ? "selected" : ""}>全部</option>
+            </select>
+          </div>
           <div class="cgpt-exporter-field">
             <label for="cgpt-exporter-page-size">每页数量</label>
             <input id="cgpt-exporter-page-size" data-option="pageSize" type="number" min="1" max="100" step="1" value="${DEFAULTS.pageSize}">
@@ -437,6 +450,8 @@
       const key = element.getAttribute("data-option");
       if (element.type === "checkbox") {
         values[key] = element.checked;
+      } else if (element.tagName === "SELECT") {
+        values[key] = element.value;
       } else {
         values[key] = Number.parseInt(element.value, 10);
       }
@@ -444,6 +459,8 @@
     values.pageSize = clampNumber(values.pageSize, 1, 100, DEFAULTS.pageSize);
     values.delayMs = clampNumber(values.delayMs, 0, 5000, DEFAULTS.delayMs);
     values.maxConversations = Math.max(0, Number.isFinite(values.maxConversations) ? values.maxConversations : 0);
+    values.scope = ["all", "projects", "currentProject", "noProject"].includes(values.scope) ? values.scope : DEFAULTS.scope;
+    values.currentProject = getCurrentProjectInfo();
     return values;
   }
 
@@ -496,6 +513,7 @@
     const discovered = discoverProjectsAndVisibleConversations();
     await enrichProjectsFromKnownApis(discovered, signal);
     logLine(`页面发现项目 ${discovered.projects.size} 个，可见对话 ${discovered.conversationHints.size} 条。`);
+    logLine(`导出范围：${describeScope(options)}`);
 
     const index = {
       schema_version: 1,
@@ -511,10 +529,12 @@
 
     await writer.writeText("README.txt", buildReadme(), "text/plain;charset=utf-8");
 
-    const listItems = await fetchAllConversationListItems(options, signal);
-    const projectItems = await fetchAllProjectConversationListItems(discovered.projects, options, signal);
+    const scopedProjects = getProjectsForScope(discovered.projects, options);
+    const listItems = shouldFetchGlobalList(options) ? await fetchAllConversationListItems(options, signal) : [];
+    const projectItems = shouldFetchProjectLists(options) ? await fetchAllProjectConversationListItems(scopedProjects, options, signal) : [];
     const mergedItems = mergeVisibleConversationHints([...projectItems, ...listItems], discovered.conversationHints);
-    const limitedItems = options.maxConversations > 0 ? mergedItems.slice(0, options.maxConversations) : mergedItems;
+    const scopedItems = filterItemsByScope(mergedItems, options);
+    const limitedItems = options.maxConversations > 0 ? scopedItems.slice(0, options.maxConversations) : scopedItems;
     state.currentRun.total = limitedItems.length;
     state.progress.max = Math.max(1, limitedItems.length);
     logLine(`待导出对话 ${limitedItems.length} 条。`);
@@ -542,6 +562,11 @@
           discovered,
           seenProjects
         });
+        if (!conversationMetaMatchesScope(meta, options)) {
+          logLine(`跳过非目标范围：${meta.title || conversationId}`);
+          state.progress.value = indexInRun + 1;
+          continue;
+        }
         if (meta.project_id && !seenProjects.has(meta.project_id)) {
           seenProjects.set(meta.project_id, {
             id: meta.project_id,
@@ -607,6 +632,78 @@
     if (index.failures.length > 0) {
       await writer.writeText("failures.json", JSON.stringify(index.failures, null, 2), "application/json;charset=utf-8");
     }
+  }
+
+  function shouldFetchGlobalList(options) {
+    return options.scope === "all" || options.scope === "noProject";
+  }
+
+  function shouldFetchProjectLists(options) {
+    return options.scope === "all" || options.scope === "projects" || options.scope === "currentProject";
+  }
+
+  function getProjectsForScope(projects, options) {
+    if (options.scope !== "currentProject") {
+      return projects;
+    }
+    const currentProject = options.currentProject;
+    const scoped = new Map();
+    if (currentProject?.id) {
+      scoped.set(currentProject.id, {
+        id: currentProject.id,
+        name: projects.get(currentProject.id)?.name || currentProject.name || currentProject.id,
+        source: "current_url"
+      });
+    }
+    return scoped;
+  }
+
+  function filterItemsByScope(items, options) {
+    if (options.scope === "all") {
+      return items;
+    }
+    return items.filter((item) => {
+      const projectId = getItemProjectId(item);
+      if (options.scope === "currentProject") {
+        return projectId === options.currentProject?.id;
+      }
+      if (options.scope === "projects") {
+        return !!projectId;
+      }
+      if (options.scope === "noProject") {
+        return !projectId;
+      }
+      return true;
+    });
+  }
+
+  function conversationMetaMatchesScope(meta, options) {
+    if (options.scope === "all") {
+      return true;
+    }
+    if (options.scope === "currentProject") {
+      return meta.project_id === options.currentProject?.id;
+    }
+    if (options.scope === "projects") {
+      return !!meta.project_id;
+    }
+    if (options.scope === "noProject") {
+      return !meta.project_id;
+    }
+    return true;
+  }
+
+  function describeScope(options) {
+    if (options.scope === "currentProject") {
+      return options.currentProject?.id ? `当前项目 ${options.currentProject.name || options.currentProject.id}` : "当前项目（未检测到）";
+    }
+    if (options.scope === "projects") {
+      return "所有项目";
+    }
+    if (options.scope === "noProject") {
+      return "项目外";
+    }
+    return "全部";
   }
 
   async function fetchAllConversationListItems(options, signal) {
@@ -792,6 +889,14 @@
   function discoverProjectsAndVisibleConversations() {
     const projects = new Map();
     const conversationHints = new Map();
+    const currentProject = getCurrentProjectInfo();
+    if (currentProject?.id) {
+      projects.set(currentProject.id, {
+        id: currentProject.id,
+        name: currentProject.name || currentProject.id,
+        source: "current_url"
+      });
+    }
     const anchors = [...document.querySelectorAll("a[href]")];
 
     for (const anchor of anchors) {
@@ -848,19 +953,46 @@
     }
 
     const currentProjectConversation = location.pathname.match(/^\/g\/(g-p-[A-Za-z0-9]+)(?:-[^/?#]+)?\/c\/([A-Za-z0-9-]+)/);
-    if (currentProjectConversation && !conversationHints.has(currentProjectConversation[2])) {
+    if (currentProjectConversation) {
       const projectId = currentProjectConversation[1];
-      conversationHints.set(currentProjectConversation[2], {
-        id: currentProjectConversation[2],
-        title: document.title || currentProjectConversation[2],
-        project_id: projectId,
-        project_name: projects.get(projectId)?.name || projectId,
-        url: location.href,
-        source: "current_url"
-      });
+      if (!projects.has(projectId)) {
+        projects.set(projectId, {
+          id: projectId,
+          name: currentProject?.name || projectId,
+          source: "current_url"
+        });
+      }
+      if (!conversationHints.has(currentProjectConversation[2])) {
+        conversationHints.set(currentProjectConversation[2], {
+          id: currentProjectConversation[2],
+          title: document.title || currentProjectConversation[2],
+          project_id: projectId,
+          project_name: projects.get(projectId)?.name || projectId,
+          url: location.href,
+          source: "current_url"
+        });
+      }
     }
 
     return { projects, conversationHints };
+  }
+
+  function getCurrentProjectInfo() {
+    const match = location.pathname.match(/^\/g\/(g-p-[A-Za-z0-9]+)(?:-[^/?#]+)?(?:\/(?:c\/([A-Za-z0-9-]+)|project))?/);
+    if (!match) {
+      return null;
+    }
+    const id = match[1];
+    const conversationId = match[2] || null;
+    const projectLink = [...document.querySelectorAll("a[href]")].find((anchor) => {
+      const href = anchor.getAttribute("href") || "";
+      return href.includes(`/g/${id}`) && href.includes("/project");
+    });
+    const name =
+      cleanText(projectLink?.textContent || "") ||
+      extractProjectName("", cleanText(projectLink?.getAttribute("aria-label") || ""), id) ||
+      id;
+    return { id, name, conversationId };
   }
 
   function mergeVisibleConversationHints(listItems, hints) {
@@ -1100,14 +1232,40 @@
     if (!value || typeof value !== "object") {
       return null;
     }
-    return value.id || value.conversation_id || value.conversationId || null;
+    return (
+      value.id ||
+      value.conversation_id ||
+      value.conversationId ||
+      value.conversation?.id ||
+      value.conversation?.conversation_id ||
+      value.conversation?.conversationId ||
+      null
+    );
   }
 
   function getConversationTitle(value) {
     if (!value || typeof value !== "object") {
       return null;
     }
-    return cleanText(value.title || value.name || value.conversation_title || "");
+    return cleanText(value.title || value.name || value.conversation_title || value.conversation?.title || value.conversation?.name || "");
+  }
+
+  function getItemProjectId(value) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+    return (
+      normalizeProjectId(value.export_hint?.project_id) ||
+      normalizeProjectId(value.project_id) ||
+      normalizeProjectId(value.projectId) ||
+      normalizeProjectId(value.gizmo_id) ||
+      normalizeProjectId(value.gizmoId) ||
+      normalizeProjectId(value.conversation?.project_id) ||
+      normalizeProjectId(value.conversation?.projectId) ||
+      normalizeProjectId(value.conversation?.gizmo_id) ||
+      normalizeProjectId(value.conversation?.gizmoId) ||
+      null
+    );
   }
 
   function findProjectId(value, depth = 0, seen = new Set()) {
